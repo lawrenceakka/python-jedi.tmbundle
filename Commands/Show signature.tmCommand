@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>beforeRunningCommand</key>
+	<string>nop</string>
+	<key>command</key>
+	<string>#!/usr/bin/env python
+# coding: utf-8
+
+import os, sys
+
+support_path = os.environ['TM_BUNDLE_SUPPORT']
+sys.path.insert(0, support_path)
+
+import completion
+completion.show_signature()
+</string>
+	<key>input</key>
+	<string>document</string>
+	<key>inputFormat</key>
+	<string>text</string>
+	<key>keyEquivalent</key>
+	<string>^$</string>
+	<key>name</key>
+	<string>Show function signatures</string>
+	<key>outputCaret</key>
+	<string>afterOutput</string>
+	<key>outputFormat</key>
+	<string>text</string>
+	<key>outputLocation</key>
+	<string>toolTip</string>
+	<key>scope</key>
+	<string>meta.function-call.python</string>
+	<key>uuid</key>
+	<string>F99D80FA-8C03-45A4-A6FD-88D3CC17A3A8</string>
+	<key>version</key>
+	<integer>2</integer>
+</dict>
+</plist>
