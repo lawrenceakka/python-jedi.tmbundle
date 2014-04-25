@@ -68,6 +68,9 @@ def test_empty_decorator():
 #? int()
 test_empty_decorator()
 
+def invalid_param(param=):
+    #? 
+    param
 # -----------------
 # flows
 # -----------------
@@ -137,8 +140,8 @@ def break(): pass
 #? int()
 a[0]
 
-#? []
-int()).
+#? ['real']
+int()).real
 
 # -----------------
 # keywords

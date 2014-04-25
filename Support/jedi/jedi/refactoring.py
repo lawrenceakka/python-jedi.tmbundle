@@ -89,7 +89,7 @@ def _rename(names, replace_str):
         nr, indent = name.line, name.column
         line = new_lines[nr - 1]
         new_lines[nr - 1] = line[:indent] + replace_str + \
-            line[indent + len(name.text):]
+            line[indent + len(name.name):]
     process(current_path, old_lines, new_lines)
     return dct
 
@@ -188,7 +188,7 @@ def inline(script):
                 replace_str = '(%s)' % replace_str
 
         # if it's the only assignment, remove the statement
-        if len(stmt.get_set_vars()) == 1:
+        if len(stmt.get_defined_names()) == 1:
             line = line[:stmt.start_pos[1]] + line[stmt.end_pos[1]:]
 
         dct = _rename(inlines, replace_str)

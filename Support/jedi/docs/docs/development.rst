@@ -50,19 +50,19 @@ The core of Jedi consists of three parts:
 
 Most people are probably interested in :ref:`code evaluation <evaluate>`,
 because that's where all the magic happens. I need to introduce the :ref:`parser
-<parser>` first, because :mod:`evaluate` uses it extensively.
+<parser>` first, because :mod:`jedi.evaluate` uses it extensively.
 
 .. _parser:
 
 Parser (parser/__init__.py)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: parser
+.. automodule:: jedi.parser
 
 Parser Representation (parser/representation.py)
 ++++++++++++++++++++++++++++++++++++++++++++++++
 
-.. automodule:: parser.representation
+.. automodule:: jedi.parser.representation
 
 Class inheritance diagram:
 
@@ -84,15 +84,15 @@ Class inheritance diagram:
 
 .. _evaluate:
 
-Evaluation of python code (evaluate.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Evaluation of python code (evaluate/__init__.py)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: evaluate
+.. automodule:: jedi.evaluate
 
-Evaluation Representation (evaluate_representation.py)
+Evaluation Representation (evaluate/representation.py)
 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-.. automodule:: evaluate_representation
+.. automodule:: jedi.evaluate.representation
 
 .. inheritance-diagram::
    Executable
@@ -100,10 +100,17 @@ Evaluation Representation (evaluate_representation.py)
    InstanceElement
    Class
    Function
-   Execution
-   Generator
-   Array
+   FunctionExecution
    :parts: 1
+
+
+.. _name_resolution:
+
+Name resolution (evaluate/finder.py)
+++++++++++++++++++++++++++++++++++++
+
+.. automodule:: jedi.evaluate.finder
+
 
 .. _dev-api:
 
@@ -117,7 +124,6 @@ conservative with the API.  I'd rather not add new API features if they are not
 necessary, because it's much harder to deprecate stuff than to add it later.
 
 
-
 .. _core-extensions:
 
 Core Extensions
@@ -125,7 +131,8 @@ Core Extensions
 
 Core Extensions is a summary of the following topics:
 
-- :ref:`Dynamic Arrays & Function Parameters <dynamic>`
+- :ref:`Iterables & Dynamic Arrays <iterables>`
+- :ref:`Dynamic Parameters <dynamic>`
 - :ref:`Fast Parser <fast_parser>`
 - :ref:`Docstrings <docstrings>`
 - :ref:`Refactoring <refactoring>`
@@ -134,12 +141,23 @@ These topics are very important to understand what Jedi additionally does, but
 they could be removed from Jedi and Jedi would still work. But slower and
 without some features.
 
-.. _dynamic:
+.. _iterables:
 
-Dynamic Arrays & Function Parameters (dynamic.py)
+Iterables & Dynamic Arrays (evaluate/iterable.py)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: dynamic
+To understand Python on a deeper level, |jedi| needs to understand some of the
+dynamic features of Python, however this probably the most complicated part:
+
+.. automodule:: jedi.evaluate.iterable
+
+
+.. _dynamic:
+
+Parameter completion (evaluate/dynamic.py)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. automodule:: jedi.evaluate.dynamic
 
 
 .. _fast_parser:
@@ -147,22 +165,21 @@ Dynamic Arrays & Function Parameters (dynamic.py)
 Fast Parser (parser/fast.py)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: parser.fast
+.. automodule:: jedi.parser.fast
 
 .. _docstrings:
 
-Docstrings (docstrings.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Docstrings (evaluate/docstrings.py)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: docstrings
+.. automodule:: jedi.evaluate.docstrings
 
 .. _refactoring:
 
-Refactoring (refactoring.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Refactoring (evaluate/refactoring.py)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: refactoring
-
+.. automodule:: jedi.refactoring
 
 
 .. _imports-modules:
@@ -175,33 +192,27 @@ Imports & Modules
 - :ref:`Builtin Modules <builtin>`
 - :ref:`Imports <imports>`
 
-.. _modules:
-
-Modules (modules.py)
-~~~~~~~~~~~~~~~~~~~~
-
-.. automodule:: modules
 
 .. _builtin:
 
-Builtin Modules (builtin.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Compiled Modules (evaluate/compiled.py)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: builtin
+.. automodule:: jedi.evaluate.compiled
+
 
 .. _imports:
 
-Imports (imports.py)
-~~~~~~~~~~~~~~~~~~~~
+Imports (evaluate/imports.py)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: imports
-
+.. automodule:: jedi.evaluate.imports
 
 
 .. _caching-recursions:
 
 Caching & Recursions
-----------------------
+--------------------
 
 
 - :ref:`Caching <cache>`
@@ -212,15 +223,14 @@ Caching & Recursions
 Caching (cache.py)
 ~~~~~~~~~~~~~~~~~~
 
-.. automodule:: cache
+.. automodule:: jedi.cache
 
 .. _recursion:
 
 Recursions (recursion.py)
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: recursion
-
+.. automodule:: jedi.evaluate.recursion
 
 
 .. _dev-helpers:
@@ -228,12 +238,11 @@ Recursions (recursion.py)
 Helper Modules
 ---------------
 
-There are some helper modules: `common.py`, `helpers.py`, `debug.py`,
-`keywords.py`, which I won't describe further. Some functions are inheritely
-important and central for Jedi to work, but not important to understand how
-Jedi works.
+Most other modules are not really central to how Jedi works. They all contain
+relevant code, but you if you understand the modules above, you pretty much
+understand Jedi.
 
 Python 2/3 compatibility (_compatibility.py)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. automodule:: _compatibility
+.. automodule:: jedi._compatibility

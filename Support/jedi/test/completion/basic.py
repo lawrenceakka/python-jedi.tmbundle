@@ -131,6 +131,13 @@ a = [a if 1.0 else '' for a in [1] if [1.0]]
 #? int() str()
 a[0]
 
+# with a dict literal
+#? str()
+[a for a in {1:'x'}][0]
+
+##? str()
+{a-1:b for a,b in {1:'a', 3:1.0}.items()}[0]
+
 # -----------------
 # nested list comprehensions
 # -----------------
@@ -265,3 +272,12 @@ except ImportError, i_b:
     i_b
     #? ImportError()
     i_b
+
+# -----------------
+# continuations
+# -----------------
+
+foo = \
+1
+#? int()
+foo

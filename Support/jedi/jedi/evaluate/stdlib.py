@@ -2,11 +2,11 @@
 Implementations of standard library functions, because it's not possible to
 understand them with Jedi.
 """
-
 from jedi._compatibility import unicode
 from jedi.evaluate import compiled
 from jedi.evaluate import representation as er
 from jedi.evaluate import iterable
+from jedi.evaluate.helpers import FakeArray, FakeStatement
 from jedi.parser import representation as pr
 from jedi import debug
 
@@ -16,8 +16,11 @@ class NotInStdLib(LookupError):
 
 
 def execute(evaluator, obj, params):
-    if not isinstance(obj, (iterable.Generator, iterable.Array)):
+    try:
         obj_name = str(obj.name)
+    except AttributeError:
+        pass
+    else:
         if obj.parent == compiled.builtin:
             # for now we just support builtin functions.
             try:
@@ -82,10 +85,27 @@ def builtins_super(evaluator, obj, params):
     return []
 
 
+def builtins_reversed(evaluator, obj, params):
+    objects = _follow_param(evaluator, params, 0)
+    if objects:
+        # unpack the iterator values
+        objects = tuple(iterable.get_iterator_types(objects))
+        if objects:
+            rev = reversed(objects)
+            # Repack iterator values and then run it the normal way. This is
+            # necessary, because `reversed` is a function and autocompletion
+            # would fail in certain cases like `reversed(x).__iter__` if we
+            # just returned the result directly.
+            stmts = [FakeStatement([r]) for r in rev]
+            objects = (FakeArray(stmts, objects[0].parent),)
+    return [er.Instance(evaluator, obj, objects)]
+
+
 _implemented = {
     'builtins': {
         'getattr': builtins_getattr,
         'type': builtins_type,
         'super': builtins_super,
+        'reversed': builtins_reversed,
     }
 }

@@ -1,12 +1,13 @@
 import re
 import os
-import sys
 
 from jedi import cache
 from jedi.parser import tokenize
+from jedi._compatibility import u
 from jedi.parser.fast import FastParser
 from jedi.parser import representation
 from jedi import debug
+from jedi.common import PushBackIterator
 
 
 class UserContext(object):
@@ -31,20 +32,23 @@ class UserContext(object):
         return path
 
     def _calc_path_until_cursor(self, start_pos=None):
+        """
+        Something like a reverse tokenizer that tokenizes the reversed strings.
+        """
         def fetch_line():
             if self._is_first:
                 self._is_first = False
                 self._line_length = self._column_temp
-                line = self._first_line
+                line = first_line
             else:
                 line = self.get_line(self._line_temp)
                 self._line_length = len(line)
-                line = line + '\n'
+            line = '\n' + line
+
             # add lines with a backslash at the end
             while True:
                 self._line_temp -= 1
                 last_line = self.get_line(self._line_temp)
-                #print self._line_temp, repr(last_line)
                 if last_line and last_line[-1] == '\\':
                     line = last_line[:-1] + ' ' + line
                     self._line_length = len(last_line)
@@ -54,55 +58,67 @@ class UserContext(object):
 
         self._is_first = True
         self._line_temp, self._column_temp = start_cursor = start_pos
-        self._first_line = self.get_line(self._line_temp)[:self._column_temp]
+        first_line = self.get_line(self._line_temp)[:self._column_temp]
 
         open_brackets = ['(', '[', '{']
         close_brackets = [')', ']', '}']
 
-        gen = tokenize.generate_tokens(fetch_line)
-        string = ''
+        gen = PushBackIterator(tokenize.generate_tokens(fetch_line))
+        string = u('')
         level = 0
         force_point = False
         last_type = None
-        try:
-            for token_type, tok, start, end, line in gen:
-                # print 'tok', token_type, tok, force_point
-                if last_type == token_type == tokenize.NAME:
-                    string += ' '
+        is_first = True
+        for tok in gen:
+            tok_type = tok.type
+            tok_str = tok.string
+            end = tok.end_pos
+            self._column_temp = self._line_length - end[1]
+            if is_first:
+                if tok.start_pos != (1, 0):  # whitespace is not a path
+                    return u(''), start_cursor
+                is_first = False
 
-                if level > 0:
-                    if tok in close_brackets:
-                        level += 1
-                    if tok in open_brackets:
-                        level -= 1
-                elif tok == '.':
+            # print 'tok', token_type, tok_str, force_point
+            if last_type == tok_type == tokenize.NAME:
+                string += ' '
+
+            if level > 0:
+                if tok_str in close_brackets:
+                    level += 1
+                if tok_str in open_brackets:
+                    level -= 1
+            elif tok_str == '.':
+                force_point = False
+            elif force_point:
+                # it is reversed, therefore a number is getting recognized
+                # as a floating point number
+                if tok_type == tokenize.NUMBER and tok_str[0] == '.':
                     force_point = False
-                elif force_point:
-                    # it is reversed, therefore a number is getting recognized
-                    # as a floating point number
-                    if token_type == tokenize.NUMBER and tok[0] == '.':
-                        force_point = False
+                else:
+                    break
+            elif tok_str in close_brackets:
+                level += 1
+            elif tok_type in [tokenize.NAME, tokenize.STRING]:
+                force_point = True
+            elif tok_type == tokenize.NUMBER:
+                pass
+            else:
+                if tok_str == '-':
+                    next_tok = next(gen)
+                    if next_tok.string == 'e':
+                        gen.push_back(next_tok)
                     else:
                         break
-                elif tok in close_brackets:
-                    level += 1
-                elif token_type in [tokenize.NAME, tokenize.STRING]:
-                    force_point = True
-                elif token_type == tokenize.NUMBER:
-                    pass
                 else:
-                    self._column_temp = self._line_length - end[1]
                     break
 
-                x = start_pos[0] - end[0] + 1
-                l = self.get_line(x)
-                l = self._first_line if x == start_pos[0] else l
-                start_cursor = x, len(l) - end[1]
-                self._column_temp = self._line_length - end[1]
-                string += tok
-                last_type = token_type
-        except tokenize.TokenError:
-            debug.warning("Tokenize couldn't finish: %s", sys.exc_info)
+            x = start_pos[0] - end[0] + 1
+            l = self.get_line(x)
+            l = first_line if x == start_pos[0] else l
+            start_cursor = x, len(l) - end[1]
+            string += tok_str
+            last_type = tok_type
 
         # string can still contain spaces at the end
         return string[::-1].strip(), start_cursor
@@ -126,6 +142,7 @@ class UserContext(object):
             + (after.group(0) if after is not None else '')
 
     def get_context(self, yield_positions=False):
+        self.get_path_until_cursor()  # In case _start_cursor_pos is undefined.
         pos = self._start_cursor_pos
         while True:
             # remove non important white space
@@ -161,14 +178,14 @@ class UserContext(object):
             self._line_cache = self.source.splitlines()
             if self.source:
                 if self.source[-1] == '\n':
-                    self._line_cache.append('')
+                    self._line_cache.append(u(''))
             else:  # ''.splitlines() == []
-                self._line_cache = ['']
+                self._line_cache = [u('')]
 
         if line_nr == 0:
             # This is a fix for the zeroth line. We need a newline there, for
             # the backwards parser.
-            return ''
+            return u('')
         if line_nr < 0:
             raise StopIteration()
         try:
@@ -196,27 +213,34 @@ class UserContextParser(object):
         return parser
 
     @cache.underscore_memoization
-    def _get_user_stmt(self):
-        return self.module().get_statement_for_position(self._position,
-                                                        include_imports=True)
-
-    def user_stmt(self, is_completion=False):
-        user_stmt = self._get_user_stmt()
-
+    def user_stmt(self):
+        module = self.module()
         debug.speed('parsed')
+        return module.get_statement_for_position(self._position, include_imports=True)
 
-        if is_completion and not user_stmt:
+    @cache.underscore_memoization
+    def user_stmt_with_whitespace(self):
+        """
+        Returns the statement under the cursor even if the statement lies
+        before the cursor.
+        """
+        user_stmt = self.user_stmt()
+
+        if not user_stmt:
             # for statements like `from x import ` (cursor not in statement)
+            # or `abs( ` where the cursor is out in the whitespace.
+            if self._user_context.get_path_under_cursor():
+                # We really should have a user_stmt, but the parser couldn't
+                # process it - probably a Syntax Error (or in a comment).
+                debug.warning('No statement under the cursor.')
+                return
             pos = next(self._user_context.get_context(yield_positions=True))
-            last_stmt = pos and \
-                self.module().get_statement_for_position(pos, include_imports=True)
-            if isinstance(last_stmt, representation.Import):
-                user_stmt = last_stmt
+            user_stmt = self.module().get_statement_for_position(pos, include_imports=True)
         return user_stmt
 
     @cache.underscore_memoization
     def user_scope(self):
-        user_stmt = self._get_user_stmt()
+        user_stmt = self.user_stmt()
         if user_stmt is None:
             def scan(scope):
                 for s in scope.statements + scope.subscopes:

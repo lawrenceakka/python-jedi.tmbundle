@@ -1,7 +1,10 @@
-import textwrap
+from textwrap import dedent
+import inspect
 
-from .helpers import TestCase
+from ..helpers import TestCase
 from jedi import Script
+from jedi._compatibility import is_py33
+
 
 class TestCallSignatures(TestCase):
     def _run(self, source, expected_name, expected_index=0, line=None, column=None):
@@ -12,7 +15,7 @@ class TestCallSignatures(TestCase):
         if not signatures:
             assert expected_name is None
         else:
-            assert signatures[0].call_name == expected_name
+            assert signatures[0].name == expected_name
             assert signatures[0].index == expected_index
 
     def _run_simple(self, source, name, index=0, column=None, line=1):
@@ -100,8 +103,8 @@ class TestCallSignatures(TestCase):
         assert Script(s).call_signatures() == []
 
         # jedi-vim #116
-        s = """import functools; test = getattr(functools, 'partial'); test("""
-        self._run(s, 'partial', 0)
+        s = """import itertools; test = getattr(itertools, 'chain'); test("""
+        self._run(s, 'chain', 0)
 
     def test_call_signature_on_module(self):
         """github issue #240"""
@@ -110,14 +113,14 @@ class TestCallSignatures(TestCase):
         assert Script(s).call_signatures() == []
 
     def test_call_signatures_empty_parentheses_pre_space(self):
-        s = textwrap.dedent("""\
+        s = dedent("""\
         def f(a, b):
             pass
         f( )""")
         self._run(s, 'f', 0, line=3, column=3)
 
     def test_multiple_signatures(self):
-        s = textwrap.dedent("""\
+        s = dedent("""\
         if x:
             def f(a, b):
                 pass
@@ -126,3 +129,95 @@ class TestCallSignatures(TestCase):
                 pass
         f(""")
         assert len(Script(s).call_signatures()) == 2
+
+    def test_call_signatures_whitespace(self):
+        s = dedent("""\
+        abs( 
+        def x():
+            pass
+        """)
+        self._run(s, 'abs', 0, line=1, column=5)
+
+    def test_decorator_in_class(self):
+        """
+        There's still an implicit param, with a decorator.
+        Github issue #319.
+        """
+        s = dedent("""\
+        def static(func):
+            def wrapped(obj, *args):
+                return f(type(obj), *args)
+            return wrapped
+
+        class C(object):
+            @static
+            def test(cls):
+                return 10
+
+        C().test(""")
+
+        signatures = Script(s).call_signatures()
+        assert len(signatures) == 1
+        x = [p.description for p in signatures[0].params]
+        assert x == ['*args']
+
+    def test_additional_brackets(self):
+        self._run('str((', 'str', 0)
+
+    def test_unterminated_strings(self):
+        self._run('str(";', 'str', 0)
+
+
+class TestParams(TestCase):
+    def params(self, source, line=None, column=None):
+        signatures = Script(source, line, column).call_signatures()
+        assert len(signatures) == 1
+        return signatures[0].params
+
+    def test_param_name(self):
+        if not is_py33:
+            p = self.params('''int(''')
+            # int is defined as: `int(x[, base])`
+            assert p[0].name == 'x'
+            assert p[1].name == 'base'
+
+        p = self.params('''open(something,''')
+        assert p[0].name in ['file', 'name']
+        assert p[1].name == 'mode'
+
+
+def test_signature_is_definition():
+    """
+    Through inheritance, a call signature is a sub class of Definition.
+    Check if the attributes match.
+    """
+    s = """class Spam(): pass\nSpam"""
+    signature = Script(s + '(').call_signatures()[0]
+    definition = Script(s + '(').goto_definitions()[0]
+    signature.line == 1
+    signature.column == 6
+
+    # Now compare all the attributes that a CallSignature must also have.
+    for attr_name in dir(definition):
+        dont_scan = ['defined_names', 'line_nr', 'start_pos', 'documentation',
+                     'doc', 'parent']
+        if attr_name.startswith('_') or attr_name in dont_scan:
+            continue
+        attribute = getattr(definition, attr_name)
+        signature_attribute = getattr(signature, attr_name)
+        if inspect.ismethod(attribute):
+            assert attribute() == signature_attribute()
+        else:
+            assert attribute == signature_attribute
+
+
+def test_no_signature():
+    # str doesn't have a __call__ method
+    assert Script('str()(').call_signatures() == []
+
+    s = dedent("""\
+    class X():
+        pass
+    X()(""")
+    assert Script(s).call_signatures() == []
+    assert len(Script(s, column=2).call_signatures()) == 1

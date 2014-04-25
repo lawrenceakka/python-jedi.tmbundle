@@ -19,11 +19,13 @@ import sys
 import json
 import hashlib
 import gc
+import inspect
+import shutil
+import re
 try:
     import cPickle as pickle
 except ImportError:
     import pickle
-import shutil
 
 from jedi import settings
 from jedi import common
@@ -95,9 +97,20 @@ def time_cache(time_add_setting):
 
 
 @time_cache("call_signatures_validity")
-def cache_call_signatures(stmt):
+def cache_call_signatures(source, user_pos, stmt):
+    """This function calculates the cache key."""
+    index = user_pos[0] - 1
+    lines = source.splitlines() or ['']
+    if source and source[-1] == '\n':
+        lines.append('')
+
+    before_cursor = lines[index][:user_pos[1]]
+    other_lines = lines[stmt.start_pos[0]:index]
+    whole = '\n'.join(other_lines + [before_cursor])
+    before_bracket = re.match(r'.*\(', whole, re.DOTALL)
+
     module_path = stmt.get_parent_until().path
-    return None if module_path is None else (module_path, stmt.start_pos)
+    return None if module_path is None else (module_path, before_bracket, stmt.start_pos)
 
 
 def underscore_memoization(func):
@@ -119,15 +132,33 @@ def underscore_memoization(func):
 
     A now has an attribute ``_x`` written by this decorator.
     """
+    name = '_' + func.__name__
+
     def wrapper(self):
-        name = '_' + func.__name__
         try:
             return getattr(self, name)
         except AttributeError:
             result = func(self)
+            if inspect.isgenerator(result):
+                result = list(result)
             setattr(self, name, result)
             return result
 
+    return wrapper
+
+
+def memoize(func):
+    """A normal memoize function."""
+    dct = {}
+
+    def wrapper(*args, **kwargs):
+        key = (args, frozenset(kwargs.items()))
+        try:
+            return dct[key]
+        except KeyError:
+            result = func(*args, **kwargs)
+            dct[key] = result
+            return result
     return wrapper
 
 
@@ -214,7 +245,7 @@ def save_parser(path, name, parser, pickling=True):
 
 class ParserPickling(object):
 
-    version = 9
+    version = 10
     """
     Version number (integer) for file system cache.
 

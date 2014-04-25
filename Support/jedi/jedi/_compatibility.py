@@ -5,6 +5,7 @@ created. Clearly there is huge need to use conforming syntax.
 import sys
 import imp
 import os
+import re
 try:
     import importlib
 except ImportError:
@@ -31,12 +32,18 @@ def find_module_py33(string, path=None):
             module_file = None
         else:
             module_path = loader.get_filename(string)
-            module_file = open(module_path)
+            module_file = open(module_path, 'rb')
     except AttributeError:
-        # is builtin module
-        module_path = string
-        module_file = None
-        is_package = False
+        # ExtensionLoader has not attribute get_filename, instead it has a
+        # path attribute that we can use to retrieve the module path
+        try:
+            module_path = loader.path
+            module_file = open(loader.path, 'rb')
+        except AttributeError:
+            module_path = string
+            module_file = None
+        finally:
+            is_package = False
 
     return module_file, module_path, is_package
 
@@ -83,11 +90,11 @@ except NameError:
     unicode = str
 
 if is_py3:
-    utf8 = lambda s: s
+    u = lambda s: s
 else:
-    utf8 = lambda s: s.decode('utf-8')
+    u = lambda s: s.decode('utf-8')
 
-utf8.__doc__ = """
+u.__doc__ = """
 Decode a raw string into unicode object.  Do nothing in Python 3.
 """
 
@@ -117,12 +124,6 @@ Usage::
     reraise(Exception, sys.exc_info()[2])
 
 """
-
-# StringIO (Python 2.5 has no io module), so use io only for py3k
-try:
-    from StringIO import StringIO
-except ImportError:
-    from io import StringIO
 
 # hasattr function used because python
 if is_py3:
@@ -178,3 +179,15 @@ try:
     import builtins  # module name in python 3
 except ImportError:
     import __builtin__ as builtins
+
+
+import ast
+
+
+def literal_eval(string):
+    # py3.0, py3.1 and py32 don't support unicode literals. Support those, I
+    # don't want to write two versions of the tokenizer.
+    if is_py3 and sys.version_info.minor < 3:
+        if re.match('[uU][\'"]', string):
+            string = string[1:]
+    return ast.literal_eval(string)

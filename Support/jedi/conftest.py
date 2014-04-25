@@ -21,11 +21,26 @@ jedi_cache_directory_orig = None
 jedi_cache_directory_temp = None
 
 
+def pytest_addoption(parser):
+    parser.addoption("--jedi-debug", "-D", action='store_true',
+                     help="Enables Jedi's debug output.")
+
+    parser.addoption("--warning-is-error", action='store_true',
+                     help="Warnings are treated as errors.")
+
+
 def pytest_configure(config):
     global jedi_cache_directory_orig, jedi_cache_directory_temp
     jedi_cache_directory_orig = jedi.settings.cache_directory
     jedi_cache_directory_temp = tempfile.mkdtemp(prefix='jedi-test-')
     jedi.settings.cache_directory = jedi_cache_directory_temp
+
+    if config.option.jedi_debug:
+        jedi.set_debug_function()
+
+    if config.option.warning_is_error:
+        import warnings
+        warnings.simplefilter("error")
 
 
 def pytest_unconfigure(config):

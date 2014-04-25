@@ -1,8 +1,8 @@
 """
 Evaluation of Python code in |jedi| is based on three assumptions:
 
-* Code is recursive (to weaken this assumption, the :mod:`dynamic` module
-  exists).
+* Code is recursive (to weaken this assumption, the
+  :mod:`jedi.evaluate.dynamic` module exists).
 * No magic is being used:
 
   - metaclasses
@@ -37,7 +37,7 @@ This is exactly where it starts to get complicated. Now recursions start to
 kick in. The statement has not been resolved fully, but now we need to resolve
 the datetime import. So it continues
 
-- follow import, which happens in the :mod:`imports` module.
+- follow import, which happens in the :mod:`jedi.evaluate.imports` module.
 - now the same ``eval_call`` as above calls ``follow_path`` to follow the
   second part of the statement ``date``.
 - After ``follow_path`` returns with the desired ``datetime.date`` class, the
@@ -68,12 +68,11 @@ backtracking algorithm.
 
 .. todo:: nonlocal statement, needed or can be ignored? (py3k)
 """
-import sys
 import itertools
 
-from jedi._compatibility import next, hasattr, unicode, reraise
-from jedi import common
+from jedi._compatibility import next, hasattr, unicode
 from jedi.parser import representation as pr
+from jedi.parser.tokenize import Token
 from jedi import debug
 from jedi.evaluate import representation as er
 from jedi.evaluate import imports
@@ -83,99 +82,16 @@ from jedi.evaluate.cache import memoize_default
 from jedi.evaluate import stdlib
 from jedi.evaluate import finder
 from jedi.evaluate import compiled
+from jedi.evaluate import precedence
 
 
 class Evaluator(object):
     def __init__(self):
         self.memoize_cache = {}  # for memoize decorators
+        self.import_cache = {}  # like `sys.modules`.
+        self.compiled_cache = {}  # see `compiled.create()`
         self.recursion_detector = recursion.RecursionDetector()
         self.execution_recursion_detector = recursion.ExecutionRecursionDetector()
-
-    def get_names_of_scope(self, scope, position=None, star_search=True,
-                           include_builtin=True):
-        """
-        Get all completions (names) possible for the current scope.
-        The star search option is only here to provide an optimization. Otherwise
-        the whole thing would probably start a little recursive madness.
-
-        This function is used to include names from outer scopes.  For example,
-        when the current scope is function:
-
-        >>> from jedi.parser import Parser
-        >>> parser = Parser('''
-        ... x = ['a', 'b', 'c']
-        ... def func():
-        ...     y = None
-        ... ''')
-        >>> scope = parser.module.subscopes[0]
-        >>> scope
-        <Function: func@3-4>
-
-        `get_names_of_scope` is a generator.  First it yields names from
-        most inner scope.
-
-        >>> pairs = list(Evaluator().get_names_of_scope(scope))
-        >>> pairs[0]
-        (<Function: func@3-4>, [<Name: y@4,4>])
-
-        Then it yield the names from one level outer scope.  For this
-        example, this is the most outer scope.
-
-        >>> pairs[1]
-        (<SubModule: None@1-4>, [<Name: x@2,0>, <Name: func@3,4>])
-
-        Finally, it yields names from builtin, if `include_builtin` is
-        true (default).
-
-        >>> pairs[2]                                        #doctest: +ELLIPSIS
-        (<Builtin: ...builtin...>, [<CompiledName: ...>, ...])
-
-        :rtype: [(pr.Scope, [pr.Name])]
-        :return: Return an generator that yields a pair of scope and names.
-        """
-        in_func_scope = scope
-        non_flow = scope.get_parent_until(pr.Flow, reverse=True)
-        while scope:
-            if isinstance(scope, pr.SubModule) and scope.parent:
-                # we don't want submodules to report if we have modules.
-                scope = scope.parent
-                continue
-            # `pr.Class` is used, because the parent is never `Class`.
-            # Ignore the Flows, because the classes and functions care for that.
-            # InstanceElement of Class is ignored, if it is not the start scope.
-            if not (scope != non_flow and scope.isinstance(pr.Class)
-                    or scope.isinstance(pr.Flow)
-                    or scope.isinstance(er.Instance)
-                    and non_flow.isinstance(er.Function)
-                    or isinstance(scope, compiled.CompiledObject)
-                    and scope.type() == 'class' and in_func_scope != scope):
-                try:
-                    if isinstance(scope, er.Instance):
-                        for g in scope.scope_generator():
-                            yield g
-                    else:
-                        yield scope, finder._get_defined_names_for_position(scope, position, in_func_scope)
-                except StopIteration:
-                    reraise(common.MultiLevelStopIteration, sys.exc_info()[2])
-            if scope.isinstance(pr.ForFlow) and scope.is_list_comp:
-                # is a list comprehension
-                yield scope, scope.get_set_vars(is_internal_call=True)
-
-            scope = scope.parent
-            # This is used, because subscopes (Flow scopes) would distort the
-            # results.
-            if scope and scope.isinstance(er.Function, pr.Function, er.FunctionExecution):
-                in_func_scope = scope
-
-        # Add star imports.
-        if star_search:
-            for s in imports.remove_star_imports(self, non_flow.get_parent_until()):
-                for g in self.get_names_of_scope(s, star_search=False):
-                    yield g
-
-            # Add builtins to the global scope.
-            if include_builtin:
-                yield compiled.builtin, compiled.builtin.get_defined_names()
 
     def find_types(self, scope, name_str, position=None, search_global=False,
                    is_goto=False, resolve_decorator=True):
@@ -210,84 +126,82 @@ class Evaluator(object):
 
         result = self.eval_expression_list(expression_list)
 
-        # Assignment checking is only important if the statement defines multiple
-        # variables.
-        if len(stmt.get_set_vars()) > 1 and seek_name and stmt.assignment_details:
+        ass_details = stmt.assignment_details
+        if ass_details and ass_details[0][1] != '=' and not isinstance(stmt, er.InstanceElement):  # TODO don't check for this.
+            expr_list, operator = ass_details[0]
+            # `=` is always the last character in aug assignments -> -1
+            operator = operator[:-1]
+            name = str(expr_list[0].name)
+            left = self.find_types(stmt.parent, name, stmt.start_pos)
+            if isinstance(stmt.parent, pr.ForFlow):
+                # iterate through result and add the values, that's possible
+                # only in for loops without clutter, because they are
+                # predictable.
+                for r in result:
+                    left = precedence.calculate(self, left, operator, [r])
+                result = left
+            else:
+                result = precedence.calculate(self, left, operator, result)
+        elif len(stmt.get_defined_names()) > 1 and seek_name and ass_details:
+            # Assignment checking is only important if the statement defines
+            # multiple variables.
             new_result = []
-            for ass_expression_list, op in stmt.assignment_details:
-                new_result += _find_assignments(ass_expression_list[0], result, seek_name)
+            for ass_expression_list, op in ass_details:
+                new_result += finder.find_assignments(ass_expression_list[0], result, seek_name)
             result = new_result
-        return set(result)
+        return result
 
-    def eval_expression_list(self, expression_list, follow_array=False):
+    def eval_expression_list(self, expression_list):
         """
         `expression_list` can be either `pr.Array` or `list of list`.
         It is used to evaluate a two dimensional object, that has calls, arrays and
         operators in it.
         """
-        def evaluate_list_comprehension(lc, parent=None):
-            input = lc.input
-            nested_lc = lc.input.token_list[0]
-            if isinstance(nested_lc, pr.ListComprehension):
-                # is nested LC
-                input = nested_lc.stmt
-            module = input.get_parent_until()
-            # create a for loop, which does the same as list comprehensions
-            loop = pr.ForFlow(module, [input], lc.stmt.start_pos, lc.middle, True)
-
-            loop.parent = parent or lc.get_parent_until(pr.IsScope)
-
-            if isinstance(nested_lc, pr.ListComprehension):
-                loop = evaluate_list_comprehension(nested_lc, loop)
-            return loop
-
         debug.dbg('eval_expression_list: %s', expression_list)
-        result = []
-        calls_iterator = iter(expression_list)
-        for call in calls_iterator:
-            if pr.Array.is_type(call, pr.Array.NOARRAY):
-                r = list(itertools.chain.from_iterable(self.eval_statement(s)
-                                                       for s in call))
-                call_path = call.generate_call_path()
-                next(call_path, None)  # the first one has been used already
-                result += self.follow_path(call_path, r, call.parent,
-                                           position=call.start_pos)
-            elif isinstance(call, pr.ListComprehension):
-                loop = evaluate_list_comprehension(call)
-                # Caveat: parents are being changed, but this doesn't matter,
-                # because nothing else uses it.
-                call.stmt.parent = loop
-                result += self.eval_statement(call.stmt)
+        p = precedence.create_precedence(expression_list)
+        return self.process_precedence_element(p) or []
+
+    def process_precedence_element(self, el):
+        if el is None:
+            return None
+        else:
+            if isinstance(el, precedence.Precedence):
+                return self._eval_precedence(el)
             else:
-                if isinstance(call, pr.Lambda):
-                    result.append(er.Function(self, call))
-                # With things like params, these can also be functions...
-                elif isinstance(call, pr.Base) and call.isinstance(
-                        er.Function, er.Class, er.Instance, iterable.ArrayInstance):
-                    result.append(call)
-                # The string tokens are just operations (+, -, etc.)
-                elif isinstance(call, compiled.CompiledObject):
-                    result.append(call)
-                elif not isinstance(call, (str, unicode)):
-                    if isinstance(call, pr.Call) and str(call.name) == 'if':
-                        # Ternary operators.
-                        while True:
-                            try:
-                                call = next(calls_iterator)
-                            except StopIteration:
-                                break
-                            with common.ignored(AttributeError):
-                                if str(call.name) == 'else':
-                                    break
-                        continue
-                    result += self.eval_call(call)
-                elif call == '*':
-                    if [r for r in result if isinstance(r, iterable.Array)
-                            or isinstance(r, compiled.CompiledObject)
-                            and isinstance(r.obj, (str, unicode))]:
-                        # if it is an iterable, ignore * operations
-                        next(calls_iterator)
-        return set(result)
+                # normal element, no operators
+                return self._eval_statement_element(el)
+
+    def _eval_precedence(self, _precedence):
+        left = self.process_precedence_element(_precedence.left)
+        right = self.process_precedence_element(_precedence.right)
+        return precedence.calculate(self, left, _precedence.operator, right)
+
+    def _eval_statement_element(self, element):
+        if pr.Array.is_type(element, pr.Array.NOARRAY):
+            r = list(itertools.chain.from_iterable(self.eval_statement(s)
+                                                   for s in element))
+            call_path = element.generate_call_path()
+            next(call_path, None)  # the first one has been used already
+            return self.follow_path(call_path, r, element.parent)
+        elif isinstance(element, pr.ListComprehension):
+            loop = _evaluate_list_comprehension(element)
+            # Caveat: parents are being changed, but this doesn't matter,
+            # because nothing else uses it.
+            element.stmt.parent = loop
+            return self.eval_statement(element.stmt)
+        elif isinstance(element, pr.Lambda):
+            return [er.Function(self, element)]
+        # With things like params, these can also be functions...
+        elif isinstance(element, pr.Base) and element.isinstance(
+                er.Function, er.Class, er.Instance, iterable.ArrayInstance):
+            return [element]
+        # The string tokens are just operations (+, -, etc.)
+        elif isinstance(element, compiled.CompiledObject):
+            return [element]
+        elif not isinstance(element, Token):
+            return self.eval_call(element)
+        else:
+            return []
 
     def eval_call(self, call):
         """Follow a call is following a function, variable, string, etc."""
@@ -314,12 +228,12 @@ class Evaluator(object):
                                         search_global=True)
             else:
                 # for pr.Literal
-                types = [compiled.create(current.value)]
+                types = [compiled.create(self, current.value)]
             types = imports.strip_imports(self, types)
 
-        return self.follow_path(path, types, scope, position=position)
+        return self.follow_path(path, types, scope)
 
-    def follow_path(self, path, types, call_scope, position=None):
+    def follow_path(self, path, types, call_scope):
         """
         Follows a path like::
 
@@ -331,7 +245,7 @@ class Evaluator(object):
         iter_paths = itertools.tee(path, len(types))
 
         for i, typ in enumerate(types):
-            fp = self._follow_path(iter_paths[i], typ, call_scope, position=position)
+            fp = self._follow_path(iter_paths[i], typ, call_scope)
             if fp is not None:
                 results_new += fp
             else:
@@ -339,7 +253,7 @@ class Evaluator(object):
                 return types
         return results_new
 
-    def _follow_path(self, path, typ, scope, position=None):
+    def _follow_path(self, path, typ, scope):
         """
         Uses a generator and tries to complete the path, e.g.::
 
@@ -360,7 +274,8 @@ class Evaluator(object):
             # This must be an execution, either () or [].
             if current.type == pr.Array.LIST:
                 if hasattr(typ, 'get_index_types'):
-                    result = typ.get_index_types(current)
+                    slc = iterable.create_indexes_or_slices(self, current)
+                    result = typ.get_index_types(slc)
             elif current.type not in [pr.Array.DICT]:
                 # Scope must be a class or func - make an instance or execution.
                 result = self.execute(typ, current)
@@ -375,9 +290,9 @@ class Evaluator(object):
                 # This is the typical lookup while chaining things.
                 if filter_private_variable(typ, scope, current):
                     return []
-            types = self.find_types(typ, current, position=position)
+            types = self.find_types(typ, current)
             result = imports.strip_imports(self, types)
-        return self.follow_path(path, set(result), scope, position=position)
+        return self.follow_path(path, result, scope)
 
     @debug.increase_indent
     def execute(self, obj, params=(), evaluate_generator=False):
@@ -390,7 +305,9 @@ class Evaluator(object):
         except stdlib.NotInStdLib:
             pass
 
-        if obj.isinstance(compiled.CompiledObject):
+        if isinstance(obj, iterable.GeneratorMethod):
+            return obj.execute()
+        elif obj.isinstance(compiled.CompiledObject):
             if obj.is_executable_class():
                 return [er.Instance(self, obj, params)]
             else:
@@ -398,8 +315,6 @@ class Evaluator(object):
         elif obj.isinstance(er.Class):
             # There maybe executions of executions.
             return [er.Instance(self, obj, params)]
-        elif isinstance(obj, iterable.Generator):
-            return obj.iter_content()
         else:
             stmts = []
             if obj.isinstance(er.Function):
@@ -416,40 +331,29 @@ class Evaluator(object):
             debug.dbg('execute result: %s in %s', stmts, obj)
             return imports.strip_imports(self, stmts)
 
-    def goto(self, stmt, call_path=None):
-        if call_path is None:
-            expression_list = stmt.expression_list()
-            if len(expression_list) == 0:
-                return [], ''
-            # Only the first command is important, the rest should basically not
-            # happen except in broken code (e.g. docstrings that aren't code).
-            call = expression_list[0]
-            if isinstance(call, (str, unicode)):
-                call_path = [call]
-            else:
-                call_path = list(call.generate_call_path())
-
+    def goto(self, stmt, call_path):
         scope = stmt.get_parent_until(pr.IsScope)
         pos = stmt.start_pos
-        call_path, search = call_path[:-1], call_path[-1]
-        pos = pos[0], pos[1] + 1
+        call_path, search_name_part = call_path[:-1], call_path[-1]
 
         if call_path:
             scopes = self.eval_call_path(iter(call_path), scope, pos)
             search_global = False
             pos = None
         else:
+            # TODO does this exist? i don't think so
             scopes = [scope]
             search_global = True
         follow_res = []
         for s in scopes:
-            follow_res += self.find_types(s, search, pos,
+            follow_res += self.find_types(s, search_name_part, pos,
                                           search_global=search_global, is_goto=True)
-        return follow_res, search
+        return follow_res, search_name_part
 
 
 def filter_private_variable(scope, call_scope, var_name):
     """private variables begin with a double underline `__`"""
+    var_name = str(var_name)  # var_name could be a NamePart
     if isinstance(var_name, (str, unicode)) and isinstance(scope, er.Instance)\
             and var_name.startswith('__') and not var_name.endswith('__'):
         s = call_scope.get_parent_until((pr.Class, er.Instance, compiled.CompiledObject))
@@ -463,66 +367,18 @@ def filter_private_variable(scope, call_scope, var_name):
     return False
 
 
-def _assign_tuples(tup, results, seek_name):
-    """
-    This is a normal assignment checker. In python functions and other things
-    can return tuples:
-    >>> a, b = 1, ""
-    >>> a, (b, c) = 1, ("", 1.0)
+def _evaluate_list_comprehension(lc, parent=None):
+    input = lc.input
+    nested_lc = input.expression_list()[0]
+    if isinstance(nested_lc, pr.ListComprehension):
+        # is nested LC
+        input = nested_lc.stmt
+    module = input.get_parent_until()
+    # create a for loop, which does the same as list comprehensions
+    loop = pr.ForFlow(module, [input], lc.stmt.start_pos, lc.middle, True)
 
-    Here, if `seek_name` is "a", the number type will be returned.
-    The first part (before `=`) is the param tuples, the second one result.
+    loop.parent = parent or lc.get_parent_until(pr.IsScope)
 
-    :type tup: pr.Array
-    """
-    def eval_results(index):
-        types = []
-        for r in results:
-            try:
-                func = r.get_exact_index_types
-            except AttributeError:
-                debug.warning("invalid tuple lookup %s of result %s in %s",
-                              tup, results, seek_name)
-            else:
-                with common.ignored(IndexError):
-                    types += func(index)
-        return types
-
-    result = []
-    for i, stmt in enumerate(tup):
-        # Used in assignments. There is just one call and no other things,
-        # therefore we can just assume, that the first part is important.
-        command = stmt.expression_list()[0]
-
-        if tup.type == pr.Array.NOARRAY:
-
-                # unnessecary braces -> just remove.
-            r = results
-        else:
-            r = eval_results(i)
-
-        # LHS of tuples can be nested, so resolve it recursively
-        result += _find_assignments(command, r, seek_name)
-    return result
-
-
-def _find_assignments(lhs, results, seek_name):
-    """
-    Check if `seek_name` is in the left hand side `lhs` of assignment.
-
-    `lhs` can simply be a variable (`pr.Call`) or a tuple/list (`pr.Array`)
-    representing the following cases::
-
-        a = 1        # lhs is pr.Call
-        (a, b) = 2   # lhs is pr.Array
-
-    :type lhs: pr.Call
-    :type results: list
-    :type seek_name: str
-    """
-    if isinstance(lhs, pr.Array):
-        return _assign_tuples(lhs, results, seek_name)
-    elif lhs.name.names[-1] == seek_name:
-        return results
-    else:
-        return []
+    if isinstance(nested_lc, pr.ListComprehension):
+        loop = _evaluate_list_comprehension(nested_lc, loop)
+    return loop

@@ -43,6 +43,49 @@ def f(a, b):
 #? 
 f()
 
+# local classes -> github #370
+class ProgramNode():
+    pass
+
+def local_classes(node, node2):
+    """
+    :type node: ProgramNode
+    ... and the class definition after this func definition:
+    :type node2: ProgramNode2
+    """
+    #? ProgramNode
+    node
+    #? ProgramNode2
+    node2
+
+class ProgramNode2():
+    pass
+
+
+def list_with_non_imports(lst):
+    """
+    Should be able to work with tuples and lists and still import stuff.
+
+    :type lst: (threading.Thread, [collections.defaultdict, ...])
+    """
+    #? ['start']
+    lst[0].start
+
+    import collections as col
+    # use some weird index
+    #? col.defaultdict()
+    lst[1][10]
+
+
+# sphinx returns
+def return_module_object():
+    """
+    :rtype: :class:`threading.Thread`
+    """
+
+#? ['join']
+return_module_object().join
+
 # -----------------
 # epydoc style
 # -----------------

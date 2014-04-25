@@ -46,7 +46,20 @@ Run test at line 4, 6, and 8 in ``basic.py``::
 
 See ``py.test --help`` for more information.
 
-If you want to debug a test, just use the --pdb option.
+If you want to debug a test, just use the ``--pdb`` option.
+
+Alternate Test Runner
++++++++++++++++++++++
+
+If you don't like the output of ``py.test``, there's an alternate test runner
+that you can start by running ``./run.py``. The above example could be run by::
+
+    ./run.py basic 4 6 8
+
+The advantage of this runner is simplicity and more customized error reports.
+Using both runners will help you to have a quicker overview of what's
+happening.
+
 
 Auto-Completion
 +++++++++++++++
@@ -99,10 +112,11 @@ Tests look like this::
 import os
 import re
 from ast import literal_eval
+from io import StringIO
+from functools import reduce
 
 import jedi
-from functools import reduce
-from jedi._compatibility import unicode, StringIO, is_py3
+from jedi._compatibility import unicode, is_py3
 
 
 TEST_COMPLETIONS = 0
@@ -125,12 +139,16 @@ class IntegrationTestCase(object):
 
     @property
     def module_name(self):
-        return re.sub('.*/|\.py', '', self.path)
+        return re.sub('.*/|\.py$', '', self.path)
+
+    @property
+    def line_nr_test(self):
+        """The test is always defined on the line before."""
+        return self.line_nr - 1
 
     def __repr__(self):
-        name = os.path.basename(self.path) if self.path else None
-        return '<%s: %s:%s:%s>' % (self.__class__.__name__,
-                                   name, self.line_nr - 1, self.line.rstrip())
+        return '<%s: %s:%s:%s>' % (self.__class__.__name__, self.module_name,
+                                   self.line_nr_test, self.line.rstrip())
 
     def script(self):
         return jedi.Script(self.source, self.line_nr, self.column, self.path)
@@ -203,8 +221,10 @@ class IntegrationTestCase(object):
                 # this means that there is a module specified
                 wanted.append(pos_tup)
             else:
-                wanted.append((self.module_name, self.line_nr + pos_tup[0],
-                                pos_tup[1]))
+                line = pos_tup[0]
+                if pos_tup[0] is not None:
+                    line += self.line_nr
+                wanted.append((self.module_name, line, pos_tup[1]))
 
         return compare_cb(self, compare, sorted(wanted))
 
@@ -215,10 +235,7 @@ def collect_file_tests(lines, lines_to_execute):
     start = None
     correct = None
     test_type = None
-    for line_nr, line in enumerate(lines):
-        line_nr += 1  # py2.5 doesn't know about the additional enumerate param
-        if not is_py3:
-            line = unicode(line, 'UTF-8')
+    for line_nr, line in enumerate(lines, 1):
         if correct:
             r = re.match('^(\d+)\s*(.*)$', correct)
             if r:
@@ -268,6 +285,8 @@ def collect_dir_tests(base_dir, test_files, check_thirdparty=False):
 
             path = os.path.join(base_dir, f_name)
             source = open(path).read()
+            if not is_py3:
+                source = unicode(source, 'UTF-8')
             for case in collect_file_tests(StringIO(source),
                                            lines_to_execute):
                 case.path = path
@@ -373,8 +392,4 @@ if __name__ == '__main__':
         print(s)
 
     exit_code = 1 if tests_fail else 0
-    if sys.hexversion < 0x02060000 and tests_fail <= 9:
-        # Python 2.5 has major incompabillities (e.g. no property.setter),
-        # therefore it is not possible to pass all tests.
-        exit_code = 0
     sys.exit(exit_code)

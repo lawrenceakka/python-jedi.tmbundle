@@ -5,16 +5,15 @@ finished (and still not working as I want), I won't document it any further.
 """
 import re
 
-from jedi._compatibility import use_metaclass
+from jedi._compatibility import use_metaclass, unicode
 from jedi import settings
 from jedi import common
 from jedi.parser import Parser
 from jedi.parser import representation as pr
 from jedi.parser import tokenize
 from jedi import cache
-
-
-SCOPE_CONTENTS = ['asserts', 'subscopes', 'imports', 'statements', 'returns']
+from jedi.parser.tokenize import (source_tokens, Token, FLOWS, NEWLINE,
+                                  COMMENT, ENDMARKER)
 
 
 class Module(pr.Simple, pr.Module):
@@ -51,8 +50,8 @@ class Module(pr.Simple, pr.Module):
         return used_names
 
     def __repr__(self):
-        return "<%s: %s@%s-%s>" % (type(self).__name__, self.name,
-                                   self.start_pos[0], self.end_pos[0])
+        return "<fast.%s: %s@%s-%s>" % (type(self).__name__, self.name,
+                                        self.start_pos[0], self.end_pos[0])
 
 
 class CachedFastParser(type):
@@ -91,7 +90,7 @@ class ParserNode(object):
 
         scope = self.content_scope
         self._contents = {}
-        for c in SCOPE_CONTENTS:
+        for c in pr.SCOPE_CONTENTS:
             self._contents[c] = list(getattr(scope, c))
         self._is_generator = scope.is_generator
 
@@ -142,7 +141,7 @@ class ParserNode(object):
     def _set_items(self, parser, set_parent=False):
         # insert parser objects into current structure
         scope = self.content_scope
-        for c in SCOPE_CONTENTS:
+        for c in pr.SCOPE_CONTENTS:
             content = getattr(scope, c)
             items = getattr(parser.module, c)
             if set_parent:
@@ -167,12 +166,15 @@ class ParserNode(object):
         """Adding a node means adding a node that was already added earlier"""
         self.children.append(node)
         self._set_items(node.parser, set_parent=set_parent)
-        node.old_children = node.children
+        node.old_children = node.children # TODO potential memory leak?
         node.children = []
 
         scope = self.content_scope
         while scope is not None:
-            scope.end_pos = node.content_scope.end_pos
+            #print('x',scope)
+            if not isinstance(scope, pr.SubModule):
+                # TODO This seems like a strange thing. Check again.
+                scope.end_pos = node.content_scope.end_pos
             scope = scope.parent
         return node
 
@@ -278,7 +280,7 @@ class FastParser(use_metaclass(CachedFastParser)):
     def _parse(self, code):
         """ :type code: str """
         def empty_parser():
-            new, temp = self._get_parser('', '', 0, [], False)
+            new, temp = self._get_parser(unicode(''), unicode(''), 0, [], False)
             return new
 
         parts = self._split_parts(code)
@@ -291,7 +293,7 @@ class FastParser(use_metaclass(CachedFastParser)):
 
         for code_part in parts:
             lines = code_part.count('\n') + 1
-            if is_first or line_offset >= p.end_pos[0]:
+            if is_first or line_offset >= p.module.end_pos[0]:
                 indent = len(re.match(r'[ \t]*', code_part).group(0))
                 if is_first and self.current_node is not None:
                     nodes = [self.current_node]
@@ -304,14 +306,14 @@ class FastParser(use_metaclass(CachedFastParser)):
                     nodes += self.current_node.old_children
 
                 # check if code_part has already been parsed
-                # print '#'*45,line_offset, p and p.end_pos, '\n', code_part
+                # print '#'*45,line_offset, p and p.module.end_pos, '\n', code_part
                 p, node = self._get_parser(code_part, code[start:],
                                            line_offset, nodes, not is_first)
 
                 # The actual used code_part is different from the given code
                 # part, because of docstrings for example there's a chance that
                 # splits are wrong.
-                used_lines = self._lines[line_offset:p.end_pos[0]]
+                used_lines = self._lines[line_offset:p.module.end_pos[0]]
                 code_part_actually_used = '\n'.join(used_lines)
 
                 if is_first and p.module.subscopes:
@@ -341,7 +343,7 @@ class FastParser(use_metaclass(CachedFastParser)):
 
                 is_first = False
             #else:
-                #print '#'*45, line_offset, p.end_pos, 'theheck\n', repr(code_part)
+                #print '#'*45, line_offset, p.module.end_pos, 'theheck\n', repr(code_part)
 
             line_offset += lines
             start += len(code_part) + 1  # +1 for newline
@@ -351,7 +353,7 @@ class FastParser(use_metaclass(CachedFastParser)):
         else:
             self.parsers.append(empty_parser())
 
-        self.module.end_pos = self.parsers[-1].end_pos
+        self.module.end_pos = self.parsers[-1].module.end_pos
 
         # print(self.parsers[0].module.get_code())
         del code
@@ -365,9 +367,9 @@ class FastParser(use_metaclass(CachedFastParser)):
             if nodes[index].code != code:
                 raise ValueError()
         except ValueError:
-            p = Parser(parser_code, self.module_path, offset=(line_offset, 0),
-                       is_fast_parser=True, top_module=self.module,
-                       no_docstr=no_docstr)
+            tokenizer = FastTokenizer(parser_code, line_offset)
+            p = Parser(parser_code, self.module_path, tokenizer=tokenizer,
+                       top_module=self.module, no_docstr=no_docstr)
             p.module.parent = self.module
         else:
             if nodes[index] != self.current_node:
@@ -384,3 +386,78 @@ class FastParser(use_metaclass(CachedFastParser)):
         self.module.reset_caches()
         if self.current_node is not None:
             self.current_node.reset_contents()
+
+
+class FastTokenizer(object):
+    """
+    Breaks when certain conditions are met, i.e. a new function or class opens.
+    """
+    def __init__(self, source, line_offset=0):
+        self.source = source
+        self.gen = source_tokens(source, line_offset)
+        self.closed = False
+
+        # fast parser options
+        self.current = self.previous = Token(None, '', (0, 0))
+        self.in_flow = False
+        self.new_indent = False
+        self.parser_indent = self.old_parser_indent = 0
+        self.is_decorator = False
+        self.first_stmt = True
+
+    def next(self):
+        """ Python 2 Compatibility """
+        return self.__next__()
+
+    def __next__(self):
+        if self.closed:
+            raise common.MultiLevelStopIteration()
+
+        current = next(self.gen)
+        tok_type = current.type
+        tok_str = current.string
+        if tok_type == ENDMARKER:
+            raise common.MultiLevelStopIteration()
+
+        self.previous = self.current
+        self.current = current
+
+        # this is exactly the same check as in fast_parser, but this time with
+        # tokenize and therefore precise.
+        breaks = ['def', 'class', '@']
+
+        def close():
+            if not self.first_stmt:
+                self.closed = True
+                raise common.MultiLevelStopIteration()
+
+        # ignore comments/ newlines
+        if self.previous.type in (None, NEWLINE) and tok_type not in (COMMENT, NEWLINE):
+            # print c, tok_name[c[0]]
+            indent = current.start_pos[1]
+            if indent < self.parser_indent:  # -> dedent
+                self.parser_indent = indent
+                self.new_indent = False
+                if not self.in_flow or indent < self.old_parser_indent:
+                    close()
+                self.in_flow = False
+            elif self.new_indent:
+                self.parser_indent = indent
+                self.new_indent = False
+
+            if not self.in_flow:
+                if tok_str in FLOWS or tok_str in breaks:
+                    self.in_flow = tok_str in FLOWS
+                    if not self.is_decorator and not self.in_flow:
+                        close()
+                    self.is_decorator = '@' == tok_str
+                    if not self.is_decorator:
+                        self.old_parser_indent = self.parser_indent
+                        self.parser_indent += 1  # new scope: must be higher
+                        self.new_indent = True
+
+            if tok_str != '@':
+                if self.first_stmt and not self.new_indent:
+                    self.parser_indent = indent
+                self.first_stmt = False
+        return current

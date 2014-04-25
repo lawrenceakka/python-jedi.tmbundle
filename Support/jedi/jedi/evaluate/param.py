@@ -2,7 +2,7 @@ import copy
 
 from jedi.parser import representation as pr
 from jedi.evaluate import iterable
-from jedi.evaluate import common
+from jedi import common
 from jedi.evaluate import helpers
 
 
@@ -32,7 +32,7 @@ def get_params(evaluator, func, var_args):
         arr.keys = key_stmts
         arr.type = array_type
 
-        new_param._expression_list = [arr]
+        new_param.set_expression_list([arr])
 
         name = copy.copy(param.get_name())
         name.parent = new_param
@@ -79,7 +79,7 @@ def get_params(evaluator, func, var_args):
         values = []
         array_type = None
         ignore_creation = False
-        if expression_list[0] == '*':
+        if param.stars == 1:
             # *args param
             array_type = pr.Array.TUPLE
             if value:
@@ -90,7 +90,7 @@ def get_params(evaluator, func, var_args):
                     var_arg_iterator.push_back((key, value))
                     break
                 values.append(value)
-        elif expression_list[0] == '**':
+        elif param.stars == 2:
             # **kwargs param
             array_type = pr.Array.DICT
             if non_matching_keys:

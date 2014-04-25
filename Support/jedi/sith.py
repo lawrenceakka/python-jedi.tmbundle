@@ -27,7 +27,7 @@ Note: Line numbers start at 1; columns start at 0 (this is consistent with
 many text editors, including Emacs).
 
 Usage:
-  sith.py [--pdb|--ipdb|--pudb] [-d] [-n=<nr>] [-f] [--record=<file>] random [<path>]
+  sith.py [--pdb|--ipdb|--pudb] [-d] [-n=<nr>] [-f] [--record=<file>] random [-s] [<path>]
   sith.py [--pdb|--ipdb|--pudb] [-d] [-f] [--record=<file>] redo
   sith.py [--pdb|--ipdb|--pudb] [-d] [-f] run <operation> <path> <line> <column>
   sith.py show [--record=<file>]
@@ -39,6 +39,7 @@ Options:
   -f, --fs-cache        By default, file system cache is off for reproducibility.
   -n, --maxtries=<nr>   Maximum of random tries [default: 100]
   -d, --debug           Jedi print debugging when an error is raised.
+  -s                    Shows the path/line numbers of every completion before it starts.
   --pdb                 Launch pdb when error is raised.
   --ipdb                Launch ipdb when error is raised.
   --pudb                Launch pudb when error is raised.
@@ -117,7 +118,7 @@ class TestCase(object):
         try:
             with open(self.path) as f:
                 self.script = jedi.Script(f.read(), self.line, self.column, self.path)
-            self.completions = getattr(self.script, self.operation)()
+            self.objects = getattr(self.script, self.operation)()
             if print_result:
                 print("{path}: Line {line} column {column}".format(**self.__dict__))
                 self.show_location(self.line, self.column)
@@ -143,41 +144,29 @@ class TestCase(object):
     def show_location(self, lineno, column, show=3):
         # Three lines ought to be enough
         lower = lineno - show if lineno - show > 0 else 0
+        prefix = '  |'
         for i, line in enumerate(self.script.source.split('\n')[lower:lineno]):
-            print(lower + i + 1, line)
-        print(' ' * (column + len(str(lineno))), '^')
+            print(prefix, lower + i + 1, line)
+        print(prefix, '   ', ' ' * (column + len(str(lineno))), '^')
 
     def show_operation(self):
         print("%s:\n" % self.operation.capitalize())
-        getattr(self, 'show_' + self.operation)()
+        if self.operation == 'completions':
+            self.show_completions()
+        else:
+            self.show_definitions()
 
     def show_completions(self):
-        for completion in self.completions:
+        for completion in self.objects:
             print(completion.name)
 
-    # TODO: Support showing the location in other files
-
-    # TODO: Move this printing to the completion objects themselves
-    def show_usages(self):
-        for completion in self.completions:
-            print(completion.description)
-            if os.path.abspath(completion.module_path) == os.path.abspath(self.path):
-                self.show_location(completion.line, completion.column)
-
-    def show_call_signatures(self):
-        for completion in self.completions:
-            # This is too complicated to print. It really should be
-            # implemented in str() anyway.
-            print(completion)
-            # Can't print the location here because we don't have the module path
-
-    def show_goto_definitions(self):
-        for completion in self.completions:
+    def show_definitions(self):
+        for completion in self.objects:
             print(completion.desc_with_module)
+            if completion.module_path is None:
+                continue
             if os.path.abspath(completion.module_path) == os.path.abspath(self.path):
                 self.show_location(completion.line, completion.column)
-
-    show_goto_assignments = show_goto_definitions
 
     def show_errors(self):
         print(self.traceback)
@@ -211,8 +200,13 @@ def main(arguments):
     else:
         for _ in range(int(arguments['--maxtries'])):
             t = TestCase.generate(arguments['<path>'] or '.')
+            if arguments['-s']:
+                print('%s %s %s %s ' % (t.operation, t.path, t.line, t.column))
+                sys.stdout.flush()
+            else:
+                print('.', end='')
             t.run(debugger, record)
-            print('.', end='')
+
             sys.stdout.flush()
         print()
 

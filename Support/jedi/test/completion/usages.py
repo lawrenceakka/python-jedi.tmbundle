@@ -11,6 +11,11 @@ abc.d.a.bsaasd.abc.d
 
 abc
 
+if 1:
+    abc = 
+else:
+    (abc) = 
+
 abc = 
 
 #< (-3,0), (0,0)
@@ -231,3 +236,26 @@ def f(**kwargs):
 if isinstance(j, int):
     #< 
     j
+
+# -----------------
+# Dynamic Param Search
+# -----------------
+
+class DynamicParam():
+    def foo(self):
+        return
+
+def check(instance):
+    #< 13 (-5,8), (0,13)
+    instance.foo()
+
+check(DynamicParam())
+
+# -----------------
+# Compiled Objects
+# -----------------
+
+import _sre
+
+#< 0 (-3,7), (0,0), ('_sre', None, None)
+_sre

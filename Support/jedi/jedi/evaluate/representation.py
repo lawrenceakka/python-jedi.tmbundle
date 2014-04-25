@@ -1,6 +1,7 @@
 """
-Like described in the :mod:`parsing_representation` module, there's a need for
-an ast like module to represent the states of parsed modules.
+Like described in the :mod:`jedi.evaluate.parsing_representation` module,
+there's a need for an ast like module to represent the states of parsed
+modules.
 
 But now there are also structures in Python that need a little bit more than
 that. An ``Instance`` for example is only a ``Class`` before it is
@@ -13,6 +14,7 @@ import copy
 
 from jedi._compatibility import use_metaclass, unicode
 from jedi.parser import representation as pr
+from jedi.parser.tokenize import Token
 from jedi import debug
 from jedi import common
 from jedi.evaluate.cache import memoize_default, CachedMetaClass
@@ -61,7 +63,7 @@ class Instance(use_metaclass(CachedMetaClass, Executable)):
         # (No var_args) used.
         self.is_generated = False
 
-    @memoize_default(None)
+    @memoize_default()
     def _get_method_execution(self, func):
         func = InstanceElement(self._evaluator, self, func, True)
         return FunctionExecution(self._evaluator, func, self.var_args)
@@ -85,6 +87,7 @@ class Instance(use_metaclass(CachedMetaClass, Executable)):
             """
             n = copy.copy(name)
             n.names = n.names[1:]
+            n._get_code = unicode(n.names[-1])
             names.append(InstanceElement(self._evaluator, self, n))
 
         names = []
@@ -106,11 +109,11 @@ class Instance(use_metaclass(CachedMetaClass, Executable)):
                     # because to follow them and their self variables is too
                     # complicated.
                     sub = self._get_method_execution(sub)
-            for n in sub.get_set_vars():
+            for n in sub.get_defined_names():
                 # Only names with the selfname are being added.
                 # It is also important, that they have a len() of 2,
                 # because otherwise, they are just something else
-                if n.names[0] == self_name and len(n.names) == 2:
+                if unicode(n.names[0]) == self_name and len(n.names) == 2:
                     add_self_dot_name(n)
 
         if not isinstance(self.base, compiled.CompiledObject):
@@ -158,17 +161,23 @@ class Instance(use_metaclass(CachedMetaClass, Executable)):
             names.append(InstanceElement(self._evaluator, self, var, True))
         yield self, names
 
-    def get_index_types(self, index=None):
-        args = [] if index is None else [index]
+    def is_callable(self):
         try:
-            return self.execute_subscope_by_name('__getitem__', args)
+            self.get_subscope_by_name('__call__')
+            return True
+        except KeyError:
+            return False
+
+    def get_index_types(self, indexes=[]):
+        try:
+            return self.execute_subscope_by_name('__getitem__', indexes)
         except KeyError:
             debug.warning('No __getitem__, cannot access the array.')
             return []
 
     def __getattr__(self, name):
         if name not in ['start_pos', 'end_pos', 'name', 'get_imports',
-                        'doc', 'docstr', 'asserts']:
+                        'doc', 'raw_doc', 'asserts']:
             raise AttributeError("Instance %s: Don't touch this (%s)!"
                                  % (self, name))
         return getattr(self.base, name)
@@ -194,7 +203,7 @@ class InstanceElement(use_metaclass(CachedMetaClass, pr.Base)):
         self.is_class_var = is_class_var
 
     @common.safe_property
-    @memoize_default(None)
+    @memoize_default()
     def parent(self):
         par = self.var.parent
         if isinstance(par, Class) and par == self.instance.base \
@@ -210,15 +219,14 @@ class InstanceElement(use_metaclass(CachedMetaClass, pr.Base)):
 
     def get_decorated_func(self):
         """ Needed because the InstanceElement should not be stripped """
-        func = self.var.get_decorated_func(self.instance)
-        if func == self.var:
-            return self
+        func = self.var.get_decorated_func()
+        func = InstanceElement(self._evaluator, self.instance, func)
         return func
 
     def expression_list(self):
         # Copy and modify the array.
         return [InstanceElement(self.instance._evaluator, self.instance, command, self.is_class_var)
-                if not isinstance(command, unicode) else command
+                if not isinstance(command, (pr.Operator, Token)) else command
                 for command in self.var.expression_list()]
 
     def __iter__(self):
@@ -230,6 +238,9 @@ class InstanceElement(use_metaclass(CachedMetaClass, pr.Base)):
 
     def isinstance(self, *cls):
         return isinstance(self.var, cls)
+
+    def is_callable(self):
+        return self.var.is_callable()
 
     def __repr__(self):
         return "<%s of %s>" % (type(self).__name__, self.var)
@@ -251,8 +262,8 @@ class Class(use_metaclass(CachedMetaClass, pr.IsScope)):
         for s in self.base.supers:
             # Super classes are statements.
             for cls in self._evaluator.eval_statement(s):
-                if not isinstance(cls, Class):
-                    debug.warning('Received non class, as a super class')
+                if not isinstance(cls, (Class, compiled.CompiledObject)):
+                    debug.warning('Received non class as a super class.')
                     continue  # Just ignore other stuff (user input error).
                 supers.append(cls)
         if not supers and self.base.parent != compiled.builtin:
@@ -267,7 +278,7 @@ class Class(use_metaclass(CachedMetaClass, pr.IsScope)):
             for i in iterable:
                 # Only the last name is important, because these names have a
                 # maximal length of 2, with the first one being `self`.
-                if i.names[-1] == name.names[-1]:
+                if unicode(i.names[-1]) == unicode(name.names[-1]):
                     return True
             return False
 
@@ -297,12 +308,15 @@ class Class(use_metaclass(CachedMetaClass, pr.IsScope)):
                 return sub
         raise KeyError("Couldn't find subscope.")
 
+    def is_callable(self):
+        return True
+
     @common.safe_property
     def name(self):
         return self.base.name
 
     def __getattr__(self, name):
-        if name not in ['start_pos', 'end_pos', 'parent', 'asserts', 'docstr',
+        if name not in ['start_pos', 'end_pos', 'parent', 'asserts', 'raw_doc',
                         'doc', 'get_imports', 'get_parent_until', 'get_code',
                         'subscopes']:
             raise AttributeError("Don't touch this: %s of %s !" % (name, self))
@@ -322,8 +336,8 @@ class Function(use_metaclass(CachedMetaClass, pr.IsScope)):
         self.base_func = func
         self.is_decorated = is_decorated
 
-    @memoize_default(None)
-    def _decorated_func(self, instance=None):
+    @memoize_default()
+    def _decorated_func(self):
         """
         Returns the function, that is to be executed in the end.
         This is also the places where the decorators are processed.
@@ -334,7 +348,7 @@ class Function(use_metaclass(CachedMetaClass, pr.IsScope)):
         if not self.is_decorated:
             for dec in reversed(self.base_func.decorators):
                 debug.dbg('decorator: %s %s', dec, f)
-                dec_results = set(self._evaluator.eval_statement(dec))
+                dec_results = self._evaluator.eval_statement(dec)
                 if not len(dec_results):
                     debug.warning('decorator not found: %s on %s', dec, self.base_func)
                     return None
@@ -344,9 +358,6 @@ class Function(use_metaclass(CachedMetaClass, pr.IsScope)):
                                   self.base_func, dec_results)
                 # Create param array.
                 old_func = Function(self._evaluator, f, is_decorated=True)
-                if instance is not None and decorator.isinstance(Function):
-                    old_func = InstanceElement(self._evaluator, instance, old_func)
-                    instance = None
 
                 wrappers = self._evaluator.execute(decorator, (old_func,))
                 if not len(wrappers):
@@ -359,20 +370,21 @@ class Function(use_metaclass(CachedMetaClass, pr.IsScope)):
                 f = wrappers[0]
 
                 debug.dbg('decorator end %s', f)
-        if f != self.base_func and isinstance(f, pr.Function):
-            f = Function(self._evaluator, f)
+
+        if isinstance(f, pr.Function):
+            f = Function(self._evaluator, f, True)
         return f
 
-    def get_decorated_func(self, instance=None):
-        decorated_func = self._decorated_func(instance)
-        if decorated_func == self.base_func:
-            return self
-        if decorated_func is None:
-            # If the decorator func is not found, just ignore the decorator
-            # function, because sometimes decorators are just really
-            # complicated.
-            return Function(self._evaluator, self.base_func, True)
-        return decorated_func
+    def get_decorated_func(self):
+        """
+        This function exists for the sole purpose of returning itself if the
+        decorator doesn't turn out to "work".
+
+        We just ignore the decorator here, because sometimes decorators are
+        just really complicated and Jedi cannot understand them.
+        """
+        return self._decorated_func() \
+            or Function(self._evaluator, self.base_func, True)
 
     def get_magic_function_names(self):
         return compiled.magic_function_class.get_defined_names()
@@ -380,13 +392,17 @@ class Function(use_metaclass(CachedMetaClass, pr.IsScope)):
     def get_magic_function_scope(self):
         return compiled.magic_function_class
 
+    def is_callable(self):
+        return True
+
     def __getattr__(self, name):
         return getattr(self.base_func, name)
 
     def __repr__(self):
+        decorated_func = self._decorated_func()
         dec = ''
-        if self._decorated_func() != self.base_func:
-            dec = " is " + repr(self._decorated_func())
+        if decorated_func is not None and decorated_func != self:
+            dec = " is " + repr(decorated_func)
         return "<e%s of %s%s>" % (type(self).__name__, self.base_func, dec)
 
 
@@ -430,9 +446,7 @@ class FunctionExecution(Executable):
         Call the default method with the own instance (self implements all
         the necessary functions). Add also the params.
         """
-        return self._get_params() + pr.Scope.get_set_vars(self)
-
-    get_set_vars = get_defined_names
+        return self._get_params() + pr.Scope.get_defined_names(self)
 
     def _copy_properties(self, prop):
         """
@@ -460,7 +474,7 @@ class FunctionExecution(Executable):
             raise AttributeError('Tried to access %s: %s. Why?' % (name, self))
         return getattr(self.base, name)
 
-    @memoize_default(None)
+    @memoize_default()
     def _scope_copy(self, scope):
         """ Copies a scope (e.g. if) in an execution """
         # TODO method uses different scopes than the subscopes property.
@@ -498,5 +512,4 @@ class FunctionExecution(Executable):
         return pr.Scope.get_statement_for_position(self, pos)
 
     def __repr__(self):
-        return "<%s of %s>" % \
-            (type(self).__name__, self.base)
+        return "<%s of %s>" % (type(self).__name__, self.base)

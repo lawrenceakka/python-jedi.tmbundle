@@ -1,30 +1,4 @@
 """
-To understand Python on a deeper level, |jedi| needs to understand some of the
-dynamic features of Python, however this probably the most complicated part:
-
-- Array modifications (e.g. ``list.append``)
-- Parameter completion in functions
-- Flow checks (e.g. ``if isinstance(a, str)`` -> a is a str)
-
-Array modifications
-*******************
-
-If the content of an array (``set``/``list``) is wanted somewhere, the current
-module will be checked for appearances of ``arr.append``, ``arr.insert``, etc.
-If the ``arr`` name points to an actual array, the content will be added
-
-This can be really cpu intensive, as you can imagine. Because |jedi| has to
-follow **every** ``append``. However this works pretty good, because in *slow*
-cases, the recursion detector and other settings will stop this process.
-
-It is important to note that:
-
-1. Array modfications work only in the current module
-2. Only Array additions are being checked, ``list.pop``, etc. is being ignored.
-
-Parameter completion
-********************
-
 One of the really important features of |jedi| is to have an option to
 understand code like this::
 
@@ -38,19 +12,12 @@ that's what a human would expect.
 
 It works as follows:
 
-- A param is being encountered
+- |Jedi| sees a param
 - search for function calls named ``foo``
-- execute these calls and check the injected params. This work with a
-  ``ParamListener``.
-
-Flow checks
-***********
-
-Flow checks are not really mature. There's only a check for ``isinstance``.  It
-would check whether a flow has the form of ``if isinstance(a, type_or_tuple)``.
-Unfortunately every other thing is being ignored (e.g. a == '' would be easy to
-check for -> a is a string). There's big potential in these checks.
+- execute these calls and check the input. This work with a ``ParamListener``.
 """
+
+from jedi._compatibility import unicode
 from jedi.parser import representation as pr
 from jedi import settings
 from jedi.evaluate import helpers
@@ -120,9 +87,11 @@ def search_params(evaluator, param):
 
                     # Need to take right index, because there could be a
                     # func usage before.
-                    i = listRightIndex(call_path, func_name)
+                    call_path_simple = [unicode(d) if isinstance(d, pr.NamePart)
+                                        else d for d in call_path]
+                    i = listRightIndex(call_path_simple, func_name)
                     first, last = call_path[:i], call_path[i + 1:]
-                    if not last and not call_path.index(func_name) != i:
+                    if not last and not call_path_simple.index(func_name) != i:
                         continue
                     scopes = [scope]
                     if first:
@@ -153,10 +122,10 @@ def search_params(evaluator, param):
 
     func = param.get_parent_until(pr.Function)
     current_module = param.get_parent_until()
-    func_name = str(func.name)
+    func_name = unicode(func.name)
     compare = func
     if func_name == '__init__' and isinstance(func.parent, pr.Class):
-        func_name = str(func.parent.name)
+        func_name = unicode(func.parent.name)
         compare = func.parent
 
     # get the param name

@@ -1,4 +1,26 @@
-import itertools
+"""
+Contains all classes and functions to deal with lists, dicts, generators and
+iterators in general.
+
+Array modifications
+*******************
+
+If the content of an array (``set``/``list``) is requested somewhere, the
+current module will be checked for appearances of ``arr.append``,
+``arr.insert``, etc.  If the ``arr`` name points to an actual array, the
+content will be added
+
+This can be really cpu intensive, as you can imagine. Because |jedi| has to
+follow **every** ``append`` and check wheter it's the right array. However this
+works pretty good, because in *slow* cases, the recursion detector and other
+settings will stop this process.
+
+It is important to note that:
+
+1. Array modfications work only in the current module.
+2. Jedi only checks Array additions; ``list.pop``, etc are ignored.
+"""
+from itertools import chain
 
 from jedi import common
 from jedi import debug
@@ -7,29 +29,32 @@ from jedi._compatibility import use_metaclass, is_py3, unicode
 from jedi.parser import representation as pr
 from jedi.evaluate import compiled
 from jedi.evaluate import helpers
-from jedi.evaluate.cache import CachedMetaClass, memoize_default
+from jedi.evaluate import precedence
+from jedi.evaluate.cache import CachedMetaClass, memoize_default, NO_DEFAULT
+from jedi.cache import underscore_memoization
 
 
 class Generator(use_metaclass(CachedMetaClass, pr.Base)):
-    """ Cares for `yield` statements. """
+    """Handling of `yield` functions."""
     def __init__(self, evaluator, func, var_args):
         super(Generator, self).__init__()
         self._evaluator = evaluator
         self.func = func
         self.var_args = var_args
 
+    @underscore_memoization
     def get_defined_names(self):
         """
         Returns a list of names that define a generator, which can return the
         content of a generator.
         """
-        names = []
-        executes_generator = ('__next__', 'send')
-        for n in ('close', 'throw') + executes_generator:
-            parent = self if n in executes_generator else compiled.builtin
-            names.append(helpers.FakeName(n, parent))
-        debug.dbg('generator names: %s', names)
-        return names
+        executes_generator = '__next__', 'send', 'next'
+        for name in compiled.generator_obj.get_defined_names():
+            if name.name in executes_generator:
+                parent = GeneratorMethod(self, name.parent)
+                yield helpers.FakeName(name.name, parent)
+            else:
+                yield name
 
     def iter_content(self):
         """ returns the content of __iter__ """
@@ -51,6 +76,19 @@ class Generator(use_metaclass(CachedMetaClass, pr.Base)):
         return "<%s of %s>" % (type(self).__name__, self.func)
 
 
+class GeneratorMethod(object):
+    """``__next__`` and ``send`` methods."""
+    def __init__(self, generator, builtin_func):
+        self._builtin_func = builtin_func
+        self._generator = generator
+
+    def execute(self):
+        return self._generator.iter_content()
+
+    def __getattr__(self, name):
+        return getattr(self._builtin_func, name)
+
+
 class Array(use_metaclass(CachedMetaClass, pr.Base)):
     """
     Used as a mirror to pr.Array, if needed. It defines some getter
@@ -60,26 +98,29 @@ class Array(use_metaclass(CachedMetaClass, pr.Base)):
         self._evaluator = evaluator
         self._array = array
 
-    def get_index_types(self, index_arr=None):
-        """ Get the types of a specific index or all, if not given """
-        if index_arr is not None:
-            if index_arr and [x for x in index_arr if ':' in x.expression_list()]:
-                # array slicing
-                return [self]
+    @memoize_default(NO_DEFAULT)
+    def get_index_types(self, indexes=()):
+        """
+        Get the types of a specific index or all, if not given.
 
-            index_possibilities = self._follow_values(index_arr)
-            if len(index_possibilities) == 1:
-                # This is indexing only one element, with a fixed index number,
-                # otherwise it just ignores the index (e.g. [1+1]).
-                index = index_possibilities[0]
-                if isinstance(index, compiled.CompiledObject) \
-                        and isinstance(index.obj, (int, str, unicode)):
-                    with common.ignored(KeyError, IndexError, TypeError):
-                        return self.get_exact_index_types(index.obj)
+        :param indexes: The index input types.
+        """
+        result = []
+        if [index for index in indexes if isinstance(index, Slice)]:
+            return [self]
 
-        result = list(self._follow_values(self._array.values))
+        if len(indexes) == 1:
+            # This is indexing only one element, with a fixed index number,
+            # otherwise it just ignores the index (e.g. [1+1]).
+            index = indexes[0]
+            if isinstance(index, compiled.CompiledObject) \
+                    and isinstance(index.obj, (int, str, unicode)):
+                with common.ignored(KeyError, IndexError, TypeError):
+                    return self.get_exact_index_types(index.obj)
+
+        result = list(_follow_values(self._evaluator, self._array.values))
         result += check_array_additions(self._evaluator, self)
-        return set(result)
+        return result
 
     def get_exact_index_types(self, mixed_index):
         """ Here the index is an int/str. Raises IndexError/KeyError """
@@ -107,12 +148,7 @@ class Array(use_metaclass(CachedMetaClass, pr.Base)):
 
         # Can raise an IndexError
         values = [self._array.values[index]]
-        return self._follow_values(values)
-
-    def _follow_values(self, values):
-        """ helper function for the index getters """
-        return list(itertools.chain.from_iterable(self._evaluator.eval_statement(v)
-                                                  for v in values))
+        return _follow_values(self._evaluator, values)
 
     def get_defined_names(self):
         """
@@ -241,8 +277,10 @@ def _check_array_additions(evaluator, compare_array, module, is_list):
         result = []
         for c in calls:
             call_path = list(c.generate_call_path())
-            separate_index = call_path.index(add_name)
-            if add_name == call_path[-1] or separate_index == 0:
+            call_path_simple = [unicode(n) if isinstance(n, pr.NamePart) else n
+                                for n in call_path]
+            separate_index = call_path_simple.index(add_name)
+            if add_name == call_path_simple[-1] or separate_index == 0:
                 # this means that there is no execution -> [].append
                 # or the keyword is at the start -> append()
                 continue
@@ -375,3 +413,67 @@ class ArrayInstance(pr.Base):
         is_list = str(self.instance.name) == 'list'
         items += _check_array_additions(self._evaluator, self.instance, module, is_list)
         return items
+
+
+def _follow_values(evaluator, values):
+    """ helper function for the index getters """
+    return list(chain.from_iterable(evaluator.eval_statement(v) for v in values))
+
+
+class Slice(object):
+    def __init__(self, evaluator, start, stop, step):
+        self._evaluator = evaluator
+        # all of them are either a Precedence or None.
+        self._start = start
+        self._stop = stop
+        self._step = step
+
+    @property
+    def obj(self):
+        """
+        Imitate CompiledObject.obj behavior and return a ``builtin.slice()``
+        object.
+        """
+        def get(element):
+            if element is None:
+                return None
+
+            result = self._evaluator.process_precedence_element(element)
+            if len(result) != 1:
+                # We want slices to be clear defined with just one type.
+                # Otherwise we will return an empty slice object.
+                raise IndexError
+            try:
+                return result[0].obj
+            except AttributeError:
+                return None
+
+        try:
+            return slice(get(self._start), get(self._stop), get(self._step))
+        except IndexError:
+            return slice(None, None, None)
+
+
+def create_indexes_or_slices(evaluator, index_array):
+    if not index_array:
+        return ()
+
+    # Just take the first part of the "array", because this is Python stdlib
+    # behavior. Numpy et al. perform differently, but Jedi won't understand
+    # that anyway.
+    expression_list = index_array[0].expression_list()
+    prec = precedence.create_precedence(expression_list)
+
+    # check for slices
+    if isinstance(prec, precedence.Precedence) and prec.operator == ':':
+        start = prec.left
+        if isinstance(start, precedence.Precedence) and start.operator == ':':
+            stop = start.right
+            start = start.left
+            step = prec.right
+        else:
+            stop = prec.right
+            step = None
+        return (Slice(evaluator, start, stop, step),)
+    else:
+        return tuple(evaluator.process_precedence_element(prec))

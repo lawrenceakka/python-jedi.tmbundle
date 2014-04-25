@@ -6,11 +6,12 @@ import re
 import sys
 import os
 
-from jedi._compatibility import builtins as _builtins
+from jedi._compatibility import builtins as _builtins, unicode
 from jedi import debug
-from jedi.parser.representation import Base
-from jedi.cache import underscore_memoization
+from jedi.cache import underscore_memoization, memoize
 from jedi.evaluate.sys_path import get_sys_path
+from jedi.parser.representation import Param, SubModule, Base, IsScope, Operator
+from jedi.evaluate.helpers import FakeName
 from . import fake
 
 
@@ -23,14 +24,30 @@ class CompiledObject(Base):
     def __init__(self, obj, parent=None):
         self.obj = obj
         self.parent = parent
-        self.doc = inspect.getdoc(obj)
+
+    @property
+    def doc(self):
+        return inspect.getdoc(self.obj) or ''
+
+    @property
+    def params(self):
+        params_str, ret = self._parse_function_doc()
+        tokens = params_str.split(',')
+        params = []
+        module = SubModule(self.get_parent_until().name)
+        # it seems like start_pos/end_pos is always (0, 0) for a compiled
+        # object
+        start_pos, end_pos = (0, 0), (0, 0)
+        for p in tokens:
+            parts = [FakeName(part) for part in p.strip().split('=')]
+            if len(parts) >= 2:
+                parts.insert(1, Operator('=', (0, 0)))
+            params.append(Param(module, parts, start_pos,
+                                end_pos, builtin))
+        return params
 
     def __repr__(self):
-        return '<%s: %s>' % (type(self).__name__, self.obj)
-
-    def get_parent_until(self, *args, **kwargs):
-        # compiled modules only use functions and classes/methods (2 levels)
-        return getattr(self.parent, 'parent', self.parent) or self.parent or self
+        return '<%s: %s>' % (type(self).__name__, repr(self.obj))
 
     @underscore_memoization
     def _parse_function_doc(self):
@@ -47,7 +64,7 @@ class CompiledObject(Base):
             return 'module'
         elif inspect.isbuiltin(cls) or inspect.ismethod(cls) \
                 or inspect.ismethoddescriptor(cls):
-            return 'def'
+            return 'function'
 
     def is_executable_class(self):
         return inspect.isclass(self.obj)
@@ -65,10 +82,13 @@ class CompiledObject(Base):
             return CompiledObject(c, self.parent)
         return self
 
+    @underscore_memoization
     def get_defined_names(self):
+        names = []
         cls = self._cls()
         for name in dir(cls.obj):
-            yield CompiledName(cls, name)
+            names.append(CompiledName(cls, name))
+        return names
 
     def instance_names(self):
         return self.get_defined_names()
@@ -79,14 +99,45 @@ class CompiledObject(Base):
         else:
             raise KeyError("CompiledObject doesn't have an attribute '%s'." % name)
 
+    def get_index_types(self, index_types):
+        # If the object doesn't have `__getitem__`, just raise the
+        # AttributeError.
+        if not hasattr(self.obj, '__getitem__'):
+            debug.warning('Tried to call __getitem__ on non-iterable.')
+            return []
+        if type(self.obj) not in (str, list, tuple, unicode, bytes, bytearray, dict):
+            # Get rid of side effects, we won't call custom `__getitem__`s.
+            return []
+
+        result = []
+        for typ in index_types:
+            index = None
+            try:
+                index = typ.obj
+                new = self.obj[index]
+            except (KeyError, IndexError, TypeError, AttributeError):
+                # Just try, we don't care if it fails, except for slices.
+                if isinstance(index, slice):
+                    result.append(self)
+            else:
+                result.append(CompiledObject(new))
+        if not result:
+            try:
+                for obj in self.obj:
+                    result.append(CompiledObject(obj))
+            except TypeError:
+                pass  # self.obj maynot have an __iter__ method.
+        return result
+
     @property
     def name(self):
         # might not exist sometimes (raises AttributeError)
         return self._cls().obj.__name__
 
     def execute_function(self, evaluator, params):
-        if self.type() != 'def':
+        if self.type() != 'function':
             return
+
         for name in self._parse_function_doc()[1].split():
             try:
                 bltn_obj = _create_from_name(builtin, builtin, name)
@@ -94,7 +145,9 @@ class CompiledObject(Base):
                 continue
             else:
                 if isinstance(bltn_obj, CompiledObject):
-                    yield bltn_obj
+                    # We want everything except None.
+                    if bltn_obj.obj is not None:
+                        yield bltn_obj
                 else:
                     for result in evaluator.execute(bltn_obj, params):
                         yield result
@@ -121,18 +174,17 @@ class CompiledObject(Base):
     def get_imports(self):
         return []  # Builtins don't have imports
 
+    def is_callable(self):
+        """Check if the object has a ``__call__`` method."""
+        return hasattr(self.obj, '__call__')
 
-class CompiledName(object):
+
+class CompiledName(FakeName):
     def __init__(self, obj, name):
+        super(CompiledName, self).__init__(name)
         self._obj = obj
         self.name = name
         self.start_pos = 0, 0  # an illegal start_pos, to make sorting easy.
-
-    def get_parent_until(self):
-        return self.parent.get_parent_until()
-
-    def __str__(self):
-        return self.name
 
     def __repr__(self):
         return '<%s: (%s).%s>' % (type(self).__name__, self._obj.name, self.name)
@@ -143,12 +195,9 @@ class CompiledName(object):
         module = self._obj.get_parent_until()
         return _create_from_name(module, self._obj, self.name)
 
-    @property
-    def names(self):
-        return [self.name]  # compatibility with parser.representation.Name
-
-    def get_code(self):
-        return self.name
+    @parent.setter
+    def parent(self, value):
+        pass  # Just ignore this, FakeName tries to overwrite the parent attribute.
 
 
 def load_module(path, name):
@@ -257,15 +306,27 @@ def _parse_function_doc(doc):
     return param_str, ret
 
 
-class Builtin(CompiledObject):
+class Builtin(CompiledObject, IsScope):
+    @memoize
     def get_defined_names(self):
         # Filter None, because it's really just a keyword, nobody wants to
         # access it.
         return [d for d in super(Builtin, self).get_defined_names() if d.name != 'None']
 
+    @memoize
+    def get_by_name(self, name):
+        item = [n for n in self.get_defined_names() if n.get_code() == name][0]
+        return item.parent
+
+
+def _a_generator(foo):
+    """Used to have an object to return for generators."""
+    yield 42
+    yield foo
 
 builtin = Builtin(_builtins)
 magic_function_class = CompiledObject(type(load_module), parent=builtin)
+generator_obj = CompiledObject(_a_generator(1.0))
 
 
 def _create_from_name(module, parent, name):
@@ -285,12 +346,28 @@ def _create_from_name(module, parent, name):
     return CompiledObject(obj, parent)
 
 
-def create(obj, parent=builtin, module=None):
+def compiled_objects_cache(func):
+    def wrapper(evaluator, obj, parent=builtin, module=None):
+        # Do a very cheap form of caching here.
+        key = id(obj), id(parent), id(module)
+        try:
+            return evaluator.compiled_cache[key][0]
+        except KeyError:
+            result = func(evaluator, obj, parent, module)
+            # Need to cache all of them, otherwise the id could be overwritten.
+            evaluator.compiled_cache[key] = result, obj, parent, module
+            return result
+    return wrapper
+
+
+@compiled_objects_cache
+def create(evaluator, obj, parent=builtin, module=None):
     """
     A very weird interface class to this module. The more options provided the
     more acurate loading compiled objects is.
     """
-    if not inspect.ismodule(parent):
+
+    if not inspect.ismodule(obj):
         faked = fake.get_faked(module and module.obj, obj)
         if faked is not None:
             faked.parent = parent

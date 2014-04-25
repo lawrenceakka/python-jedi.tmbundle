@@ -7,8 +7,9 @@ mixing in Python code, the autocompletion should work much better for builtins.
 import os
 import inspect
 
-from jedi._compatibility import is_py3, builtins
+from jedi._compatibility import is_py3, builtins, unicode
 from jedi.parser import Parser
+from jedi.parser import tokenize
 from jedi.parser.representation import Class
 from jedi.evaluate.helpers import FakeName
 
@@ -30,7 +31,7 @@ def _load_faked_module(module):
         except IOError:
             modules[module_name] = None
             return
-        module = Parser(source, module_name).module
+        module = Parser(unicode(source), module_name).module
         modules[module_name] = module
 
         if module_name == 'builtins' and not is_py3:
@@ -49,21 +50,27 @@ def search_scope(scope, obj_name):
             return s
 
 
+def get_module(obj):
+    if inspect.ismodule(obj):
+        return obj
+    try:
+        obj = obj.__objclass__
+    except AttributeError:
+        pass
+
+    try:
+        imp_plz = obj.__module__
+    except AttributeError:
+        # Unfortunately in some cases like `int` there's no __module__
+        return builtins
+    else:
+        return __import__(imp_plz)
+
+
 def _faked(module, obj, name):
     # Crazy underscore actions to try to escape all the internal madness.
     if module is None:
-        try:
-            module = obj.__objclass__
-        except AttributeError:
-            pass
-
-        try:
-            imp_plz = obj.__module__
-        except AttributeError:
-            # Unfortunately in some cases like `int` there's no __module__
-            module = builtins
-        else:
-            module = __import__(imp_plz)
+        module = get_module(obj)
 
     faked_mod = _load_faked_module(module)
     if faked_mod is None:
@@ -96,7 +103,8 @@ def get_faked(module, obj, name=None):
     if not isinstance(result, Class) and result is not None:
         # Set the docstr which was previously not set (faked modules don't
         # contain it).
-        result.docstr = obj.__doc__ or ''
+        doc = '''"""%s"""''' % obj.__doc__  # TODO need escapes.
+        result.add_docstr(tokenize.Token(tokenize.STRING, doc, (0, 0)))
         return result
 
 
@@ -104,4 +112,5 @@ def is_class_instance(obj):
     """Like inspect.* methods."""
     return not (inspect.isclass(obj) or inspect.ismodule(obj)
                 or inspect.isbuiltin(obj) or inspect.ismethod(obj)
-                or inspect.ismethoddescriptor(obj))
+                or inspect.ismethoddescriptor(obj) or inspect.iscode(obj)
+                or inspect.isgenerator(obj))
